@@ -1,30 +1,33 @@
-from gevent import pywsgi, monkey
-monkey.patch_all()
+# from gevent import pywsgi
 from flask import Flask, request, jsonify
-from flask_sockets import Sockets
+# from flask_sockets import Sockets
 import json
 import cv2
 import base64
 from flask_cors import CORS
-from geventwebsocket.handler import WebSocketHandler
+# from geventwebsocket.handler import WebSocketHandler
 import threading 
 import time
+from flask_socketio import SocketIO,emit
 import numpy as np
 from flask_sqlalchemy import SQLAlchemy
-from datetime import datetime
 from flask_jwt_extended import JWTManager,create_access_token
 
+
 app = Flask(__name__)
-app.config['SQLALCHEMY_DATABASE_URI']='postgresql://postgres:root@localhost:5432/jsw'
-db=SQLAlchemy(app)
-sockets = Sockets(app)
+app.config['SQLALCHEMY_DATABASE_URI'] = 'postgresql://postgres:root@localhost:5432/jsw'
+app.config['JWT_SECRET_KEY'] = 'qwertyuiop' 
+app.config['SECRET_KEY'] = 'vnkdjnfjknfl1232#'  
+socketio = SocketIO(app, cors_allowed_origins="*")
+
+db = SQLAlchemy(app)
+
 CORS(app)
-app.config['JWT_SECRET_KEY'] = 'qwertyuiop'
-jwt = JWTManager(app)
+jwt=JWTManager(app)
 
 def get_cam1_rtsp():
     try:
-        # print("hello json")
+        
         with open('cameras.json','r') as file:
             cameras=json.load(file)
             cam1_rtsp=cameras.get('Cam1')
@@ -34,7 +37,7 @@ def get_cam1_rtsp():
             return cam1_rtsp,cam2_rtsp
     except FileNotFoundError:
         return None
-    
+
 @app.route('/login',methods=['POST'])
 def login():
     data=request.json
@@ -42,6 +45,7 @@ def login():
   
     username=login_details.get('userId')
     password=login_details.get('password')
+
 
     hardcoded_username='admin'
     hardcoded_password='password123'
@@ -51,142 +55,34 @@ def login():
     else:
         return jsonify(status=False, error="Invalid username or password"), 401
 
-class SlabTable(db.Model):
-    __tablename__ = 'slab_table'
-    current_slab = db.Column(db.Integer, primary_key=True, autoincrement=True)
-    actual_slab = db.Column(db.Integer, nullable=False)
-    result = db.Column(db.Boolean, default=True)
-    timestamp = db.Column(db.DateTime, default=datetime.utcnow)
-    mode = db.Column(db.String(20), default='active')
+@app.route('/change_mode', methods=['POST'])
+def changemode():
+    data = request.json
+    mode_details = data.get('curr_mode', {})
 
-with app.app_context():
-    db.create_all()
-
-@app.route('/tasks')
-def get_slab():
-    try:
-        slabs = SlabTable.query.all()
-        slab_list = [{
-            'current_slab': slab.current_slab,
-            'actual_slab': slab.actual_slab,
-            'result': slab.result,
-            'timestamp': slab.timestamp.isoformat(), 
-            'mode': slab.mode
-        } for slab in slabs]
-        return jsonify({"slabs": slab_list}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-@app.route('/tasks', methods=['POST'])
-def create_slab():
-    try:
-        data = request.get_json()
-        current_slab = data.get('current_slab')
-        actual_slab = data.get('actual_slab')
-        result = data.get('result', True)
-        timestamp = datetime.utcnow()  
-        mode = data.get('mode', 'active')  
-
-        new_slab = SlabTable(current_slab=current_slab, actual_slab=actual_slab, result=result,
-                             timestamp=timestamp, mode=mode)
-        db.session.add(new_slab)
-        db.session.commit()
-
-        return jsonify({"message": "New slab created successfully"}), 201
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"error": str(e)}), 500
-
-class User(db.Model):
-    __tablename__ = 'users'
-   
-    username = db.Column(db.String(100), primary_key=True, nullable=False)
-    name = db.Column(db.String(100), nullable=False)  
-    password = db.Column(db.String(100), nullable=False)
-    user_type = db.Column(db.String(20), default='regular')  
-
-with app.app_context():
-    db.create_all()
-
-@app.route('/users', methods=['GET'])
-def get_users():
-    try:
-        users = User.query.all()
-        user_list = [{
-            'username': user.username,
-            'name': user.name,  
-            'password': user.password,
-            'user_type': user.user_type
-        } for user in users]
-        return jsonify({"users": user_list}), 200
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-@app.route('/users', methods=['POST'])
-def create_user():
-    try:
-        data = request.get_json()
-        username = data.get('username')
-        password = data.get('password')
-        name = data.get('name') 
-        user_type = data.get('user_type', 'regular')  
-
-        existing_user=User.query.filter_by(username=username).first()
-        if existing_user:
-            return jsonify({"error": "Username already exists"}), 400
-
-        new_user = User(username=username, name=name, password=password, user_type=user_type)
-        db.session.add(new_user)
-        db.session.commit()
-
-        return jsonify({"message": "New user created successfully"}), 201
-    except Exception as e:
-        db.session.rollback()
-        return jsonify({"error": str(e)}), 500
-
-class FrameGenerator:
-    def __init__(self, rtsp_url, rtsp_url1):
-        self.curr_frame = None
-        self.curr_frame1 = None
-        self.cap = cv2.VideoCapture(rtsp_url)
-        self.cap1 = cv2.VideoCapture(rtsp_url1)
-        if not self.cap.isOpened():
-            print("Error: Couldn't open the camera.")
-            # exit()
-        if not self.cap1.isOpened():
-            print("Error: Couldn't open camera 2.")
-            # exit()
-
-    def generate_frames(self):
-        # print("hello 2")
+    if mode_details:
         try:
-            while True:
-                ret, frame = self.cap.read()
-                if not ret:
-                    frame = np.zeros((480, 640, 3), dtype=np.uint8)
-               
-                self.curr_frame = frame
+            with open('mode.json', 'r') as file:
+                mode = json.load(file)
+        except FileNotFoundError:
+            mode = {}
 
-                time.sleep(0.01)
-        except Exception as e:
-            print("Error in generate frame:", e)
+        mode = mode_details
 
-    def generate_frames1(self):
-        # print("hello 3")
-        try:
-            while True:
-                ret, frame = self.cap1.read()
-                if not ret:
-                    frame = np.zeros((480, 640, 3), dtype=np.uint8)
-               
-                self.curr_frame1 = frame
+        with open('mode.json', 'w') as file:
+            json.dump(mode, file)
+        
+        return jsonify({'message': f'mode changed successfully', 'status': True}), 200
+    else:
+        return jsonify({'error': 'Invalid request data'}), 400
+    
 
-                time.sleep(0.01)
-        except Exception as e:
-            print("Error in generate frame:", e)
-
-
-rtsp_url,rtsp_url1 = get_cam1_rtsp()
-frame_generator = FrameGenerator(rtsp_url, rtsp_url1)
+@app.route('/manual_slab_entry',methods=['POST'])
+def slabid():
+     data = request.json
+     slab_id = data.get('slab_id')
+     print(slab_id)
+     return jsonify({'slab_number':slab_id})
 
 @app.route('/add_cam', methods=['POST'])
 def add_camera():
@@ -215,7 +111,170 @@ def add_camera():
     else:
         return jsonify({'error': 'Invalid request data'}), 400
 
-@app.route('/add_db', methods=['POST'])
+
+class User(db.Model):
+    __tablename__ = 'users'
+   
+    username = db.Column(db.String(100), primary_key=True, nullable=False)
+    name = db.Column(db.String(100), nullable=False)  
+    password = db.Column(db.String(100), nullable=False)
+    user_type = db.Column(db.String(20), default='regular')  
+
+with app.app_context():
+    db.create_all()
+
+
+
+@app.route('/users', methods=['POST','GET'])
+def create_user():
+    try:
+        data = request.json['user_data']
+        
+        username = data.get('userId')
+        password = data.get('password')
+        name = data.get('name') 
+        user_type = data.get('user_type')  
+
+        existing_user=User.query.filter_by(username=username).first()
+        if existing_user:
+            return jsonify({"error": "Username already exists"}), 200
+
+        new_user = User(username=username, name=name, password=password, user_type=user_type)
+        db.session.add(new_user)
+        db.session.commit()
+
+        return jsonify({"message": "New user created successfully",'status':True}), 200
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+@app.route('/edit_user', methods=['POST','GET'])
+def edit_user():
+    try:
+        data = request.json['user_data']
+        
+        username = data.get('userId')
+        oldpassword = data.get('old_password')
+        newpassword = data.get('new_password') 
+        user_type = data.get('user_type')  
+
+        existing_user=User.query.filter_by(username=username).first()
+        if existing_user:
+            if existing_user.password==oldpassword:
+                existing_user.password=newpassword
+                db.session.commit()
+                return jsonify({"message": "Password updated successfully", 'status': True}), 200
+            else:
+                return jsonify({"error": "Old password doesn't match", 'status': False}), 200
+            
+        else:
+            return jsonify({"error": "User not found", 'status': False}), 200
+
+    
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({"error": str(e)}), 500
+
+class FrameGenerator:
+    def __init__(self, rtsp_url,rtsp_url1):
+        self.curr_frame = None
+        self.curr_frame1=None
+        self.cap = cv2.VideoCapture(rtsp_url)
+        self.cap1=cv2.VideoCapture(rtsp_url1)
+        self.camera_connected=True
+        if not self.cap.isOpened():
+            print("Error: Couldn't open the camera.")
+            self.camera_connected = False
+        else:
+            self.camera_connected = True
+
+    def generate_frames(self):
+        try:
+            while True:
+                if self.camera_connected:
+                    
+                    ret, frame = self.cap.read()
+                    if not ret:
+                        print("Error: Couldn't read frame from the camera.")
+                        self.camera_connected = False
+                        continue
+                    
+                    else:
+                        self.curr_frame = frame
+
+                
+                else:
+                    self.cap.release()
+                    self.cap = cv2.VideoCapture(rtsp_url)
+                    if self.cap.isOpened():
+                        print("Camera reconnected.")
+                        self.camera_connected = True
+                    else:
+                        print('unable to reconnect')
+                
+
+        except Exception as e:
+            print("Error in generating frame:", e)
+
+        
+
+    def generate_frames1(self):
+        try:
+            while True:
+                if self.camera_connected:
+                    ret,frame=self.cap1.read()
+
+                    if not ret:
+                        print("Error : Couldnt read frame from the camera")
+                        self.camera_connected=False
+                        continue
+                    else:
+                        self.curr_frame1=frame
+                else:
+                    self.cap1.release()
+                    self.cap1=cv2.VideoCapture(rtsp_url1)
+                    if self.cap1.isOpened():
+                        print("Camera Reconnected")
+                        self.camera_connected=True
+                    else:
+                        print("Error in generating frame:", e)
+
+                        
+        except Exception as e:
+             print("Error in generating frame:", e)
+       
+rtsp_url,rtsp_url1=get_cam1_rtsp()
+frame_generator = FrameGenerator(rtsp_url,rtsp_url1)
+             
+    
+@socketio.on('connect')
+def handle_connect():
+    print('Client connected')
+    res = json.dumps('Hello from the server')
+    socketio.emit('server_message',res)
+
+def emit_continuous_data():
+    while True:
+        frame = frame_generator.curr_frame
+        frame1 = frame_generator.curr_frame1
+        
+
+        if frame is not None and frame1 is not None:
+            cv2.namedWindow('frame',cv2.WINDOW_NORMAL)
+            cv2.imshow('frame',frame)
+            if cv2.waitKey(1) & 0xFF==ord('q'):
+                break
+            _, buffer = cv2.imencode('.jpg', frame)
+            _, buffer1 = cv2.imencode('.jpg', frame1)
+            image_64_encode = base64.b64encode(buffer).decode('ascii')
+            image_64_encode1 = base64.b64encode(buffer1).decode('ascii')
+            result = json.dumps({'image_1': image_64_encode, 'cam_status_1': True,
+                                    'image_2': image_64_encode1, 'cam_status_2': True})
+            socketio.emit('server_data', result)
+        time.sleep(0.001)
+    
+
+@app.route('/add_db', methods=['POST'])   
 def add_database():
     data = request.json
     db_details = data.get('dbDetails', {})
@@ -235,55 +294,24 @@ def add_database():
         return jsonify({'message': f'PLC added successfully', 'status': True}), 200
     else:
         return jsonify({'error': 'Invalid request data'}), 400
-
-@app.route('/add_plc', methods=['POST'])
-def add_plc():
-    data = request.json
-    plc_details = data.get('plcDetails', {})
-
-    if plc_details:
-        try:
-            with open('plc.json', 'r') as file:
-                plc = json.load(file)
-        except FileNotFoundError:
-            plc = {}
-
-        plc = plc_details
-
-        with open('plc.json', 'w') as file:
-            json.dump(plc, file)
-        
-        return jsonify({'message': f'PLC added successfully', 'status': True}), 200
-    else:
-        return jsonify({'error': 'Invalid request data'}), 400
-
-@sockets.route('/video_feed')
-def video_feed(ws):
-    print("hello1")
-    while True:
-
-        frame = frame_generator.curr_frame
-        frame1=frame_generator.curr_frame1
-        outFrame = cv2.imencode('.jpg', frame)[1].tobytes()
-        outFrame1 = cv2.imencode('.jpg', frame1)[1].tobytes()
-        image_64_incode = base64.b64encode(outFrame).decode('ascii')
-        image_64_incode1= base64.b64encode(outFrame1).decode('ascii')
-        result = json.dumps({'image_1': image_64_incode, 'cam_status_1': True , 'image_2': image_64_incode1, 'cam_status_2': True})
-        if ws.closed == False:
-            ws.send(result)
-        time.sleep(0.01)
-
-def server():
-    server = pywsgi.WSGIServer(('0.0.0.0', 5000), app, handler_class=WebSocketHandler)
-    print("Server running...")
-    server.serve_forever()
-
+    
+    
+def run_server():
+   
+    socketio.run(app, host='0.0.0.0', port=5001)
 if __name__ == '__main__':
- 
+    socket_thread=threading.Thread(target=run_server,)
+    socket_thread.start()
+    
     t1 = threading.Thread(target=frame_generator.generate_frames)
     t1.start()
-    t3 = threading.Thread(target=frame_generator.generate_frames1)
-    t3.start()
-    t2 = threading.Thread(target=server)
+    t2 = threading.Thread(target=frame_generator.generate_frames1)
     t2.start()
-    
+    thread = threading.Thread(target=emit_continuous_data)
+    thread.start()
+
+   
+
+  
+  
+  
