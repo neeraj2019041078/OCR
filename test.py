@@ -69,10 +69,10 @@ def emit_continuous_data():
         frame1 = frame_generator.frame_2
 
         if frame is not None and frame1 is not None:
-            # cv2.namedWindow('frame', cv2.WINDOW_NORMAL)
-            # cv2.imshow('frame', frame)
-            # if cv2.waitKey(1) & 0xFF == ord('q'):
-            #     break
+            cv2.namedWindow('frame', cv2.WINDOW_NORMAL)
+            cv2.imshow('frame', frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
             _, buffer = cv2.imencode('.jpg', frame)
             _, buffer1 = cv2.imencode('.jpg', frame1)
             image_64_encode = base64.b64encode(buffer).decode('ascii')
@@ -93,7 +93,7 @@ def get_cam_rtsp():
         return None
 
 def run_server():
-    socketio.run(app, host='0.0.0.0', port=5001)
+    socketio.run(app, host='0.0.0.0', port=5000)
 
 if __name__ == '__main__':
     frame_generator = FrameGenerator()
